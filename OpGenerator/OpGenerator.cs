@@ -79,6 +79,8 @@ class OpGenerator
 			return "parameters";
 		case "ref":
 			return "reference";
+		case "event":
+			return "evnt";
 		}
 		return paramName;
 	}
@@ -316,6 +318,10 @@ class OpGenerator
 			   else
 				p ($"desc.AddInput ({ParamMap (arg.name)});");
 		}
+
+		pi ("foreach ( TFOperation control in CurrentDependencies )");
+		p ("desc.AddControlInput (control);");
+		pd ("");
 
 		// If we have attributes
 		if (required_attrs.Count > 0 || optional_attrs.Count > 0) {

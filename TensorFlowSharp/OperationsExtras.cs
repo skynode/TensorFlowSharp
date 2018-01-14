@@ -31,7 +31,11 @@ namespace TensorFlow
 			if (shape.IsFullySpecified) {
 				// The python code distinguishes between tensor and sparsetensor
 
-				return this.Const (shape.ToIntArray (), TFDataType.Int32);
+				var array = new int [shape.NumDimensions];
+				for (int i = 0; i < array.Length; i++)
+					array [i] = i;
+
+				return this.Const (array, TFDataType.Int32);
 			}
 			// Otherwise, we rely on Range and Rank to do the right thing at run-time.
 			return Range (Const (0), Rank (input), Const (1));
@@ -60,6 +64,28 @@ namespace TensorFlow
 		}
 
 		/// <summary>
+		/// Computes the product of elements across dimensions of a tensor.
+		/// </summary>
+		/// <returns>The reduced tensor.</returns>
+		/// <param name="input">The tensor to reduce. Should have numeric type.</param>
+		/// <param name="axis">The dimensions to reduce. If not se (the default), reduces all dimensions.</param>
+		/// <param name="keep_dims">If set to <c>true</c> retains reduced dimensions with length 1.</param>
+		/// <param name="operName">A name for the operation, optional.</param>
+		/// <remarks>
+		///   Reduces input_tensor along the dimensions given in axis.
+		/// Unless keep_dims is true, the rank of the tensor is reduced by 1 for each
+		/// entry in axis. If keep_dims is true, the reduced dimensions
+		/// are retained with length 1.
+		/// 
+		/// If axis has no entries, all dimensions are reduced, and a
+		/// tensor with a single element is returned.
+		/// </remarks>
+		public TFOutput ReduceProd (TFOutput input, TFOutput? axis = null, bool? keep_dims = false, string operName = null)
+		{
+			return Prod (input, this.ReduceDims (input, axis), keep_dims, operName);
+		}
+
+		/// <summary>
 		/// Computes the mean of elements across dimensions of a tensor.
 		/// </summary>
 		/// <returns>The reduced tensor.</returns>
@@ -84,6 +110,7 @@ namespace TensorFlow
 				input = this.Cast (input, TFDataType.Int8);
 			return this.Mean (input, this.ReduceDims (input, axis), keep_dims, operName);
 		}
+
 
 		// Helper method to create a variable and track it.
 		Variable MakeVariable (TFOutput initialValue, bool trainable, string operName)
@@ -174,6 +201,8 @@ namespace TensorFlow
 		/// </remarks>
 		public TFOperation [] GetGlobalVariablesInitializer ()
 		{
+			if (pending_init_variables == null)
+				pending_init_variables = new List<TFOperation> ();
 			var res = pending_init_variables.ToArray ();
 			pending_init_variables.Clear ();
 			return res;
@@ -379,7 +408,7 @@ namespace TensorFlow
 		/// <remarks>
 		/// Given a tensor <paramref name="x"/>, this operation returns a tensor of the same type and shape
 		/// as <paramref name="x"/> with its values clipped to <paramref name="clip_value_min"/> and <paramref name="clip_value_max"/>.
-		/// Any values less than <paramref name="clib_value_min"/> are set to <paramref name="clip_value_min"/>. Any values greater than 
+		/// Any values less than <paramref name="clip_value_min"/> are set to <paramref name="clip_value_min"/>. Any values greater than 
 		/// <paramref name="clip_value_max"/> are set to <paramref name="clip_value_max"/>.
 		/// </remarks>
 		/// <param name="x">The tensor.</param>
@@ -489,14 +518,144 @@ namespace TensorFlow
 		}
 
 		/// <summary>
+		///   Computes sigmoid cross entropy given `logits`.
+		/// </summary>
+		/// 
+		/// <remarks>
+		///    Measures the probability error in discrete classification tasks in which each
+		///    class is independent and not mutually exclusive.For instance, one could
+		///    perform multilabel classification where a picture can contain both an elephant
+		///    and a dog at the same time.
+		/// </remarks>
+		/// 
+		public TFOutput SigmoidCrossEntropyWithLogits (TFOutput labels, TFOutput logits, string operName = null)
+		{
+			// https://github.com/tensorflow/tensorflow/blob/r1.3/tensorflow/python/ops/nn_impl.py#L100
+
+			var scopeName = this.MakeName ("logistic_loss", operName);
+			using (var newScope = this.WithScope (scopeName)) {
+				// Note: The following lines have not been ported from the original TF implementation since 
+				// TensorFlowSharp API should guarantee that logits and labels are of type TFOutput by design:
+				//
+				//   logits = ops.convert_to_tensor(logits, name: "logits");
+				//   labels = ops.convert_to_tensor(labels, name: "labels");
+				//   try
+				//   {
+				//       labels.get_shape().merge_with(logits.get_shape())
+				//   }
+				//   catch
+				//   {
+				//       throw new ArgumentException("logits and labels must have the same shape ({logits.get_shape()} vs {labels.get_shape()})");
+				//   }
+
+				// The logistic loss formula from above is
+				// x - x * z + log(1 + exp(-x))
+				// For x < 0, a more numerically stable formula is
+				//   -x * z + log(1 + exp(x))
+				// Note that these two expressions can be combined into the following:
+				// max(x, 0) - x * z + log(1 + exp(-abs(x)))
+				// To allow computing gradients at zero, we define custom versions of max and
+				// abs functions.
+				TFOutput zeros = this.ZerosLike (logits);
+				TFOutput cond = this.GreaterEqual (logits, zeros);
+				TFOutput relu_logits = this.Where (cond, logits, zeros);
+				TFOutput neg_abs_logits = this.Where (cond, this.Neg (logits), logits);
+				return this.Add (
+					this.Sub (relu_logits, this.Mul (logits, labels)),
+					this.Log1p (this.Exp (neg_abs_logits)),
+					operName: operName);
+			}
+		}
+
+		/// <summary>
+		///   Shuffle dimensions of x according to a permutation.
+		/// </summary>
+		/// <param name="x">
+		/// </param>
+		/// <param name="operName">
+		///   If specified, the created operation in the graph will be this one, otherwise it will be named 'Transpose'.
+		/// </param>
+		/// <returns>
+		///   The TFOperation can be fetched from the resulting TFOutput, by fethching the Operation property from the result.
+		/// </returns>
+		/// <remarks>
+		///   The output `y` has the same rank as `x`. The shapes of `x` and `y` satisfy:
+		///     `y.shape[i] == x.shape[perm[i]] for i in [0, 1, ..., rank(x) - 1]`
+		/// </remarks>
+		public TFOutput Transpose (TFOutput x, string operName = null)
+		{
+			TFOutput rank = Rank (x);
+			TFOutput perm = Sub (Sub (rank, Const (1)), Range (Const (0), rank, Const (1)));
+
+			return Transpose (x: x, perm: perm, operName: operName);
+    }
+    
+		///   Returns <paramref name="true_fn"/> if the predicate <paramref name="pred"/> is <c>true</c> else <paramref name="false_fn"/>.
+		/// </summary>
+		/// <param name="pred">A scalar determining whether to return the result of true_fn or false_fn.</param>
+		/// <param name="true_fn">The callable to be performed if pred is true.</param>
+		/// <param name="false_fn">The callable to be performed if pred is false.</param>
+		/// <param name="operName">Optional name prefix for the returned tensors.</param>
+		/// <returns>TFOutput.</returns>
+		public TFOutput Cond (TFOutput pred, Func<TFOutput> true_fn, Func<TFOutput> false_fn, string operName = null)
+		{
+			using (WithScope (this.MakeName ("cond", operName))) {
+				// Add the Switch to the graph.
+				(TFOutput p_2, TFOutput p_1) = Switch (pred, pred);
+				TFOutput pivot_t = Identity (p_1, operName: "switch_t");
+				TFOutput pivot_f = Identity (p_2, operName: "switch_f");
+				pred = Identity (pred, operName: "pred_id");
+
+				TFOutput res_t;
+				TFOutput res_f;
+
+				// Build the graph for the true branch in a new context.
+				using (WithDependencies (pivot_t.Operation)) {
+					res_t = true_fn ();
+				}
+
+				// Build the graph for the false branch in a new context.
+				using (WithDependencies (pivot_f.Operation)) {
+					res_f = false_fn ();
+				}
+
+				// Add the final merge to the graph.
+				(TFOutput merges, TFOutput index) = Merge (new [] { res_f, res_t });
+
+				return merges;
+			}
+		}
+
+		/// <summary>
+		///   Return elements from x or y depending on condition.
+		/// </summary>
+		/// 
+		/// <param name="condition">LabeledTensor of type `bool`.</param>
+		/// <param name="x">LabeledTensor for values where condition is true.</param>
+		/// <param name="y">LabeledTensor for values where condition is false.</param>
+		/// <param name="name">Optional op name.</param>
+		/// 
+		/// <returns>The labeled tensor with values according to condition.</returns>
+		/// 
+		public TFOutput Where (TFOutput condition, TFOutput? x, TFOutput? y, string name = null)
+		{
+			// https://github.com/tensorflow/tensorflow/blob/d4ce3b4681b3a550c095b2cd18a79494d1cc4039/tensorflow/python/ops/array_ops.py#L2342
+			if (x == null && y == null)
+				return this.Where (input: condition, operName: name);
+			else if (x != null && y != null)
+				return this.Select (condition: condition, t: x.Value, e: y.Value, operName: name);
+			throw new ArgumentException ("x and y must both be non-None or both be None.");
+		}
+
+		/// <summary>
 		/// Stacks a list of rank-`R` tensors into one rank-`(R+1)` tensor.
 		/// </summary>
 		/// <remarks>
 		///  Packs the list of tensors in <paramref name="values"/> into a tensor with rank one higher than
 		///  each tensor in <paramref name="values"/>, by packing them along the <paramref name="axis"/> dimension.
-		///  Given a list of length <c>N</c> of tensors of shape </c>(A, B, C)</c>: if <c>axis == 0</c> then the 
-		///  <c>output</c> tensor will have the shape <c>(N, A, B, C)</c>; if <c>axis == 1<c> then the <c>output<c>
-		///  tensor will have the shape <c>(A, N, B, C)<c>; etc.
+		///  Given a list of length <c>N</c> of tensors of shape <c>(A, B, C)</c>: if <c>axis == 0</c> then the 
+		///  <c>output</c> tensor will have the shape <c>(N, A, B, C)</c>; if <c>axis == 1</c> then the <c>output</c>
+		///  tensor will have the shape <c>(A, N, B, C)</c>; etc.
 		/// </remarks>
 		/// 
 		public TFOutput Stack (TFOutput [] values, int? axis = 0, string operName = "stack")
