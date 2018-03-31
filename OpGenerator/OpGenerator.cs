@@ -22,6 +22,109 @@ using System.Text;
 using System.Runtime.InteropServices;
 using tensorflow;
 
+class ApiDefMap : IDisposable 
+{
+	public class Status : IDisposable
+	{
+		[DllImport ("libtensorflow")]
+		static extern unsafe IntPtr TF_NewStatus ();
+
+		[DllImport ("libtensorflow")]
+		internal static extern unsafe void TF_DeleteStatus (IntPtr status);
+
+		[DllImport ("libtensorflow")]
+		static extern unsafe int TF_GetCode (IntPtr s);
+
+		IntPtr handle;
+		public Status ()
+		{
+			handle = TF_NewStatus ();
+		}
+
+		void IDisposable.Dispose ()
+		{
+			TF_DeleteStatus (handle);
+			handle = IntPtr.Zero;
+		}
+
+		public bool Ok => TF_GetCode (handle) == 0;
+		public bool Error => TF_GetCode (handle) != 0;
+
+		public static implicit operator IntPtr (Status s)
+		{
+			return s.handle;
+		}
+	}
+
+	[DllImport ("libtensorflow")]
+	unsafe extern static IntPtr TF_NewApiDefMap (IntPtr buffer, IntPtr status);
+
+	[DllImport ("libtensorflow")]
+	static extern void TF_DeleteApiDefMap (IntPtr handle);
+
+	[DllImport ("libtensorflow")]
+	static extern void TF_ApiDefMapPut (IntPtr handle, string text, IntPtr textLen, IntPtr status);
+
+	[DllImport ("libtensorflow")]
+	unsafe static extern OpGenerator.LLBuffer *TF_ApiDefMapGet (IntPtr handle, string name, IntPtr nameLen, IntPtr status);
+
+	IntPtr handle;
+
+	unsafe public ApiDefMap (OpGenerator.LLBuffer* buffer)
+	{
+		using (var status = new Status ()) {
+			handle = TF_NewApiDefMap ((IntPtr)buffer, status);
+
+			if (status.Error)
+				throw new ArgumentException ("Failure to call TF_NewApiDefMap");
+		}
+	}
+
+	void IDisposable.Dispose ()
+	{
+		Dispose (true);
+		GC.SuppressFinalize (this);
+	}
+
+	~ApiDefMap ()
+	{
+		Dispose (false);
+	}
+
+	void Dispose (bool disposing)
+	{
+		if (disposing) {
+			if (handle != IntPtr.Zero) {
+				TF_DeleteApiDefMap (handle);
+				handle = IntPtr.Zero;
+			}
+		}
+	}
+
+	public unsafe ApiDef Get (string name)
+	{
+		using (var status = new Status ()) {
+			var ptr = TF_ApiDefMapGet (handle, name, (IntPtr)name.Length, status);
+			if (status.Error)
+				return null;
+			var ret = new byte [(int)ptr->length];
+			Marshal.Copy (ptr->data, ret, 0, (int)ptr->length);
+			var str = new MemoryStream (ret);
+			return Serializer.Deserialize<ApiDef> (str);
+		}
+	}
+
+	public unsafe bool Put (string text)
+	{
+		using (var status = new Status ()) {
+			TF_ApiDefMapPut (handle, text, (IntPtr)text.Length, status);
+			if (status.Error)
+				return false;
+			return true;
+		}
+	}
+}
+
 class OpGenerator
 {
 	//
@@ -173,9 +276,50 @@ class OpGenerator
 		if (text == null || text == "")
 			return;
 		var lines = text.Split ('\n');
+		var open = true;
+
+		string Quote (string input)
+		{
+			var p = input.IndexOf ('`');
+			if (p == -1)
+				return input;
+			var res = new StringBuilder ();
+			foreach (var c in input) {
+				if (c == '`') {
+					res.Append (open ? "<c>" : "</c>");
+					open = !open;
+				} else
+					res.Append (c);
+			}
+			return res.ToString ();
+		}
+
+		bool blockOpen = true;
 		foreach (var line in lines) {
-			var line2 = line.Replace ("<", "&lt;").Replace (">", "&gt;").Replace ("&", "&amp;");
-			p ($"///   {line2}");
+			if (line.IndexOf ("in image height coordinates.") != -1) {
+				Console.WriteLine ("Hello");
+			}
+
+			var line2 = line.Trim ().Replace ("<", "&lt;").Replace (">", "&gt;").Replace ("&", "&amp;");
+
+			if (line2.StartsWith ("```")){
+				p ("///    " + (blockOpen ? "<code>" : "</code>"));
+				blockOpen = !blockOpen;
+				if (line2 == "```python" || line2 == "```c++" || line2 == "```")
+					continue;
+				// Handle some broken comments in the api specs, they sometimes missuse the 
+
+				line2 = line2.Substring (3);
+				if (line2.EndsWith ("```")){
+					var line3 = line2.Substring (0, line2.Length - 3);
+					p ($"///    {Quote (line3)}");
+					p ("///    " + (blockOpen ? "<code>" : "</code>"));
+					blockOpen = !blockOpen;
+					continue;
+				}
+			} 
+			p ($"///   {Quote (line2)}");
+
 		}
 	}
 
@@ -183,12 +327,13 @@ class OpGenerator
 	// Produces the C# inline documentation
 	void GenDocs (OpDef oper)
 	{
+		var api = apimap.Get (oper.name);
 		p ("/// <summary>");
-		Comment (oper.summary);
+		Comment (api.Summary);
 		p ("/// </summary>");
-		foreach (var input in oper.input_arg) {
-			p ($"/// <param name=\"{ParamMap (input.name)}\">");
-			Comment (input.description);
+		foreach (var input in api.InArgs) {
+			p ($"/// <param name=\"{ParamMap (input.Name)}\">");
+			Comment (input.Description);
 			p ($"/// </param>");
 		}
 #if DOCS
@@ -208,23 +353,25 @@ class OpGenerator
 		foreach (var attr in optional_attrs) {
 			p ($"/// <param name=\"{ParamMap (attr.name)}\">");
 			Comment ("Optional argument");
-			Comment (attr.description);
+
+			Comment (api.Attrs.Where (x=>x.Name == attr.name).FirstOrDefault ().Description);
 			p ($"/// </param>");
 		}
 		foreach (var attr in required_attrs) {
 			p ($"/// <param name=\"{ParamMap (attr.name)}\">");
-			Comment (attr.description);
+			Comment (api.Attrs.Where (x=>x.Name == attr.name).FirstOrDefault ().Description);
 			p ($"/// </param>");
 		}
 		p ($"/// <returns>");
 		if (have_return_value) {
 			if (oper.output_arg.Count == 1) {
-				Comment (oper.output_arg.First ().description);
+				Comment (api.OutArgs.First ().Description);
 				Comment ("The TFOperation can be fetched from the resulting TFOutput, by fethching the Operation property from the result.");
 			} else {
 				Comment ("Returns a tuple with multiple values, as follows:");
 				foreach (var arg in oper.output_arg) {
-					Comment (ParamMap (arg.name) + ": " + arg.description);
+					var oapi = api.OutArgs.Where (x => x.Name == arg.name).FirstOrDefault ();
+					Comment (ParamMap (arg.name) + ": " + oapi.Description);
 				}
 
 				Comment ("The TFOperation can be fetched from any of the TFOutputs returned in the tuple values, by fethching the Operation property.");
@@ -234,9 +381,9 @@ class OpGenerator
 		}
 		p ($"/// </returns>");
 
-		if (!String.IsNullOrEmpty (oper.description)) {
+		if (!String.IsNullOrEmpty (api.Description)) {
 			p ("/// <remarks>");
-			Comment (oper.description);
+			Comment (api.Description);
 			p ("/// </remarks>");
 		}
 	}
@@ -383,23 +530,36 @@ class OpGenerator
 
 	[DllImport ("libtensorflow")]
 	unsafe extern static LLBuffer *TF_GetAllOpList ();
+	ApiDefMap apimap;
 
 	MemoryStream GetOpsList ()
 	{
 		unsafe
 		{
 			LLBuffer* ptr = TF_GetAllOpList ();
+			apimap = new ApiDefMap (ptr);
 			var ret = new byte [(int)ptr->length];
 			Marshal.Copy (ptr->data, ret, 0, (int)ptr->length);
 			return new MemoryStream (ret);
 		}
 	}
 
-	void Run ()
+	// Incorporates out-of-band data into the API definitions that we pulled out of GetAllOpList
+	void UpdateApis (string [] dirs)
 	{
-		
+		foreach (var dir in dirs) {
+			foreach (var f in Directory.GetFiles (dir)) {
+				var s = File.ReadAllText (f);
+				apimap.Put (s);
+			}
+		}
+	}
+
+	void Run (string [] dirs)
+	{
 		output = File.CreateText ("../../../TensorFlowSharp/Operations.g.cs");
 	     	var operations = Serializer.Deserialize<List<OpDef>> (GetOpsList ());
+		UpdateApis (dirs);
 		p ("using System;\n");
 
 		pi ("namespace TensorFlow {");
@@ -434,9 +594,10 @@ class OpGenerator
 				continue;
 			}
 #endif
+			var def = apimap.Get (oper.name);
 
 			// Undocumented operation, perhaps we should not surface
-			if (oper.summary == "")
+			if (def.Summary == "")
 				continue;
 
 			Generate (oper);
@@ -478,6 +639,9 @@ class OpGenerator
 	{
 		if (Marshal.SizeOf (typeof (IntPtr)) != 8)
 			throw new Exception ("Need to run in 64");
-		new OpGenerator ().Run ();
+		if (args.Length == 0)
+			args = new string [] { "/cvs/tensorflow/tensorflow/core/api_def/base_api" };
+		
+		new OpGenerator ().Run (args);
 	}
 }

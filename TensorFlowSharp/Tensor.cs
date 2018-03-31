@@ -23,8 +23,16 @@ namespace TensorFlow
 	/// <remarks>
 	/// <para>
 	/// You can create tensors with the various constructors in this class, or using
-	/// the implicit conversions from various data types into a TFTensor.
+	/// the implicit conversions from various data types into a TFTensor, including
+	/// the creation of tensors from simple constants (returning a tensor that reprensets
+	/// a scalar, that is, it is a 0D tensor), arrays (returning a tensor of a single
+	/// dimension, 1D) or arbitrary multidimensional arrays.
 	///</para>
+	/// <para>
+	///   Given a tensor, you can retrieve the number of dimensions in it via the
+	///   NumDims property, or you can retrieve the shape of a tensor, that is how many
+	///   elements on each dimension the tensor has, by fetching the Shape property.
+	/// </para>
 	/// <para>
 	/// The implicit conversions for basic types produce tensors of one dimesion with
 	/// a single element, while the implicit conversion from an array, expects a multi-dimensional
@@ -35,6 +43,22 @@ namespace TensorFlow
 	/// really represents a byte array.   You can create string tensors by using the <see cref="M:TensorFlow.TFTensor.CreateString"/> 
 	/// method that takes a byte array buffer as input.
 	/// </para>
+	/// <example>
+	/// <code>
+	///   TFTensor scalar = 1;           // Creates a 0D tensor, for the integer value 1
+	///   int d = scalar.NumDims;        // d will be equal to zero, as it is a 0D tensor
+	///   long [] shape = scalar.Shape   // returns an empty array, as it is a 0D tensor
+	///   
+	///   TFTensor list = new [] {1,2,3} // Creates a 1D tensor, or vector, for the values 1, 2, 3
+	///   d = list.NumDims;              // d will be one
+	///   shape = list.Shape;            // shape will be an array with a single value 3, representing that the dimension 0 has 3 elements
+	/// 
+	///                                  // Creates a 3D tensor, 
+	///   TFTensor cube = new [,,] { {{1,2,3},{4,5,6}}}
+	///   d = cube.NumDims               // d will be 3
+	///   shape = list.Shape             // shape will be [1,2,3] which is the shape of the above 3D array
+	/// </code>
+	/// </example>
 	/// </remarks>
 	public class TFTensor : TFDisposable
 	{
@@ -837,6 +861,90 @@ namespace TensorFlow
 			throw new ArgumentOutOfRangeException (nameof(type), $"The given type could not be mapped to an existing {nameof(TFDataType)}.");
 		}
 
+		internal static (TFDataType dt, long size) TensorTypeAndSizeFromType (Type t)
+		{
+			var tc = Type.GetTypeCode (t);
+			TFDataType dt;
+			long size = 0;
+			switch (tc) {
+			case TypeCode.Boolean:
+				dt = TFDataType.Bool;
+				size = 1;
+				break;
+			case TypeCode.SByte:
+				dt = TFDataType.Int8;
+				size = 1;
+				break;
+			case TypeCode.Byte:
+				dt = TFDataType.UInt8;
+				size = 1;
+				break;
+			case TypeCode.Int16:
+				dt = TFDataType.Int16;
+				size = 2;
+				break;
+			case TypeCode.UInt16:
+				dt = TFDataType.UInt16;
+				size = 2;
+				break;
+			case TypeCode.Int32:
+				dt = TFDataType.Int32;
+				size = 4;
+				break;
+			case TypeCode.Int64:
+				dt = TFDataType.Int64;
+				size = 8;
+				break;
+			case TypeCode.Single:
+				dt = TFDataType.Float;
+				size = 4;
+				break;
+			case TypeCode.Double:
+				dt = TFDataType.Double;
+				size = 8;
+				break;
+			default:
+				// Check types that are not handled by the typecode
+				if (t.IsAssignableFrom (typeof (Complex))) {
+					size = 16;
+					dt = TFDataType.Complex128;
+				} else
+					throw new ArgumentException ($"The data type {t} is not supported");
+				break;
+			}
+			return (dt, size);
+		}
+
+		internal static unsafe object FetchSimple (TFDataType dt, object data)
+		{
+			switch (dt) {
+			case TFDataType.Float:
+				return Convert.ToSingle (data);
+			case TFDataType.Double:
+				return Convert.ToDouble (data);
+			case TFDataType.Int32:
+				return Convert.ToInt32 (data);
+			case TFDataType.UInt8:
+				return Convert.ToByte (data);
+			case TFDataType.Int16:
+				return Convert.ToInt16 (data);
+			case TFDataType.Int8:
+				return Convert.ToSByte (data);
+			case TFDataType.String:
+				throw new NotImplementedException ();
+			case TFDataType.Int64:
+				return Convert.ToInt64 (data);
+			case TFDataType.Bool:
+				return Convert.ToBoolean (data);
+			case TFDataType.UInt16:
+				return Convert.ToUInt16 (data);
+			case TFDataType.Complex128:
+				return (Complex)data;
+			default:
+				return null;
+			}
+		}
+
 		static unsafe object FetchSimple (TFDataType dt, IntPtr data)
 		{
 			switch (dt) {
@@ -864,6 +972,35 @@ namespace TensorFlow
 				return *(Complex*)data;
 			default:
 				return null;
+			}
+		}
+
+		//used to create multidementional arrays / tensor with a constant value
+		internal static unsafe void Set (Array target, TFDataType dt, long [] shape, int [] idx, int level, object value)
+		{
+			if (level < shape.Length - 1) {
+				for (idx [level] = 0; idx [level] < shape [level]; idx [level]++)
+					Set (target, dt, shape, idx, level + 1, value);
+			} else {
+				for (idx [level] = 0; idx [level] < shape [level]; idx [level]++) {
+					switch (dt) {
+					case TFDataType.Float:
+					case TFDataType.Double:
+					case TFDataType.Int32:
+					case TFDataType.UInt8:
+					case TFDataType.Int16:
+					case TFDataType.Int8:
+					case TFDataType.Int64:
+					case TFDataType.Bool:
+					case TFDataType.Complex128:
+						target.SetValue (value, idx);
+						break;
+					case TFDataType.String:
+						throw new NotImplementedException ("String decoding not implemented for tensor vecotrs yet");
+					default:
+						throw new NotImplementedException ();
+					}
+				}
 			}
 		}
 

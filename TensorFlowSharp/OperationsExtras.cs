@@ -261,34 +261,6 @@ namespace TensorFlow
 		}
 
 		/// <summary>
-		/// Outputs random values from a normal distribution
-		/// </summary>
-		/// <returns>A tensor of the specified shape filled with random normal values.</returns>
-		/// <param name="shape">Shape of the output tensor.</param>
-		/// <param name="mean">The mean of the standard distribution.</param>
-		/// <param name="stddev">The standard deviation of the normal distribution.</param>
-		/// <param name="seed">Integer seed used for the random distribution, using the TensorFlow SetRandomSeed .</param>
-		/// <param name="operName">Operation name, optional.</param>
-		public TFOutput RandomNormal (TFShape shape, double mean = 0, double stddev = 1, int? seed = null, string operName = null)
-		{
-			var scopeName = MakeName ("RandomNormal", operName);
-
-			using (var newScope = WithScope (scopeName)) {
-				var shapeTensor = ShapeTensorOutput (shape);
-
-				var tmean = Const (mean, "mean");
-				var tstddev = Const (stddev, "stddev");
-
-				int graph, local;
-				GetRandomSeeds (seed, out graph, out local);
-
-				var rnd = RandomStandardNormal (shapeTensor, TFDataType.Double, graph, local);
-				var mul = Mul (rnd, tstddev);
-				return Add (mul, tmean);
-			}
-		}
-
-		/// <summary>
 		/// Gets or sets the graph random seed, see remarks for details.
 		/// </summary>
 		/// <value>The seed.</value>
@@ -588,8 +560,9 @@ namespace TensorFlow
 			TFOutput perm = Sub (Sub (rank, Const (1)), Range (Const (0), rank, Const (1)));
 
 			return Transpose (x: x, perm: perm, operName: operName);
-    }
-    
+		}
+
+		/// <summary>
 		///   Returns <paramref name="true_fn"/> if the predicate <paramref name="pred"/> is <c>true</c> else <paramref name="false_fn"/>.
 		/// </summary>
 		/// <param name="pred">A scalar determining whether to return the result of true_fn or false_fn.</param>
